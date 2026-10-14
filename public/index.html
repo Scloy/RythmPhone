@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RythmPhone · PC (transmissor)</title>
-  <link rel="stylesheet" href="style.css" />
+  <title>RythmPhone · Transmitir do PC</title>
+  <meta name="description" content="Use o celular como caixa de som do PC." />
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div class="wrap">
@@ -12,79 +13,80 @@
       <div class="logo">♪</div>
       <div>
         <h1>RythmPhone</h1>
-        <div class="sub">Use o celular como caixa de som do PC pelo cabo USB</div>
+        <div class="sub">Seu celular como caixa de som do PC</div>
       </div>
       <div class="spacer"></div>
-      <span class="pill"><span class="dot" id="srvDot"></span><span id="srvTxt">Servidor…</span></span>
+      <span class="pill"><span class="dot" id="srvDot"></span><span id="srvTxt">Iniciando…</span></span>
     </header>
 
-    <div class="card">
-      <h2>1 · Transmitir o áudio do PC</h2>
-      <div class="row">
-        <button class="btn" id="startBtn">▶ Começar a transmitir</button>
-        <button class="btn stop" id="stopBtn" style="display:none">■ Parar</button>
-        <div class="spacer"></div>
-        <span class="pill"><span class="dot" id="lisDot"></span><span id="lisTxt">0 celulares ouvindo</span></span>
-      </div>
-      <div class="meter"><div id="meter"></div></div>
-      <div class="msg info show" id="hint">
-        Ao clicar, o navegador vai perguntar o que compartilhar. Escolha
-        <b>“Tela inteira”</b> e <b>marque “Compartilhar áudio do sistema”</b>
-        (canto inferior esquerdo da janela). Funciona no Chrome ou Edge no Windows.
-      </div>
-      <div class="msg err" id="err"></div>
+    <div class="msg info" id="mobileBanner">
+      Parece que você está no celular. 👉 <a href="/phone"><b>Abrir o receptor (caixa de som)</b></a>
     </div>
 
-    <div class="card">
-      <h2>2 · Conectar o celular pelo USB</h2>
-      <div class="tabs">
-        <div class="tab active" data-tab="teth">Tethering USB (mais fácil)</div>
-        <div class="tab" data-tab="adb">ADB (sem usar dados)</div>
+    <div class="grid2">
+      <div class="card center">
+        <h2>1 · No celular, abra o link ou escaneie</h2>
+        <img id="qr" class="qr" alt="QR code" />
+        <div class="muted">ou acesse <a id="phoneLink" target="_blank"></a> e digite o código</div>
+        <div class="code" id="code">······</div>
+        <button class="btn ghost small" id="newCodeBtn">↻ Gerar novo código</button>
       </div>
 
-      <div class="tabpane active" id="tab-teth">
-        <ol>
-          <li>Ligue o celular no PC com o cabo USB.</li>
-          <li>
-            <b>Android:</b> Configurações → Rede/Conexões → Ponto de acesso e tethering → ative
-            <b>Tethering USB</b> (ou “Ancoragem USB”).<br />
-            <b>iPhone:</b> Ajustes → Acesso Pessoal → ative (com o iTunes instalado no PC).
-          </li>
-          <li>Clique em “Atualizar” abaixo e abra no navegador do celular o endereço que apareceu
-            (normalmente começa com <code>192.168.</code> ou <code>172.20.</code>):</li>
-        </ol>
-        <div class="urls" id="urls"></div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn ghost" id="refreshBtn">↻ Atualizar endereços</button>
+      <div class="card">
+        <h2>2 · Escolha o que transmitir</h2>
+        <label class="ctl">Fonte do áudio
+          <select id="mode">
+            <option value="display">Tela inteira / Guia do navegador (recomendado)</option>
+            <option value="device">Dispositivo de áudio (Mixagem estéreo, VB-CABLE…)</option>
+          </select>
+        </label>
+
+        <div id="deviceBox" style="display:none">
+          <label class="ctl">Dispositivo
+            <select id="device"><option value="">— clique em “Listar dispositivos” —</option></select>
+          </label>
+          <button class="btn ghost small" id="listBtn" style="margin-top:8px">🎚 Listar dispositivos</button>
         </div>
-        <p class="muted">
-          Se o Windows perguntar sobre o Firewall para o Node.js, permita em <b>redes privadas e públicas</b>.
-          Obs.: com tethering o PC pode passar a usar a internet do celular; se não quiser, use a aba ADB.
-        </p>
-      </div>
 
-      <div class="tabpane" id="tab-adb">
-        <ol>
-          <li>No celular, ative as <b>Opções do desenvolvedor</b> e a <b>Depuração USB</b>.</li>
-          <li>Baixe o <a href="https://developer.android.com/tools/releases/platform-tools" target="_blank">Android Platform Tools</a>
-            e extraia a pasta <code>platform-tools</code> dentro da pasta do RythmPhone (ou coloque o adb no PATH).</li>
-          <li>Conecte o cabo e aceite o pedido de depuração no celular. O servidor faz o resto automaticamente.</li>
-          <li>No celular, abra: <span class="url" id="adbUrl">http://localhost:3000/phone</span></li>
-        </ol>
-        <p class="muted">Status do ADB: <b id="adbStatus">verificando…</b></p>
+        <div class="row" style="margin-top:16px">
+          <button class="btn" id="startBtn">▶ Transmitir</button>
+          <button class="btn stop" id="stopBtn" style="display:none">■ Parar</button>
+          <div class="spacer"></div>
+          <span class="pill"><span class="dot" id="lisDot"></span><span id="lisTxt">0 celulares</span></span>
+        </div>
+        <div class="meter"><div id="meter"></div></div>
+        <div class="msg err" id="err"></div>
+        <div id="phones" class="phones"></div>
       </div>
     </div>
 
     <div class="card">
-      <h2>Dicas</h2>
+      <h2>⚠️ Por que não sai o áudio de uma “Janela”?</h2>
+      <p class="p">
+        O Chrome/Edge no Windows <b>não captura áudio de janelas individuais</b> — só de
+        <b>Guias</b> e da <b>Tela inteira</b>. Por isso, ao clicar em Transmitir:
+      </p>
       <ul>
-        <li>No celular, toque em <b>Tocar</b> e deixe a tela ligada.</li>
-        <li>O som continua saindo no PC também — abaixe o volume das caixas/fones do PC (ou deixe-as desligadas).</li>
-        <li>Se picotar, aumente o “Atraso/Buffer” na tela do celular.</li>
+        <li><b>Som do PC todo</b> (Spotify, jogos, YouTube, etc.): escolha a aba <b>“Tela inteira”</b> e ative <b>“Compartilhar áudio do sistema”</b>.</li>
+        <li><b>Só uma guia</b> (YouTube, Spotify Web…): escolha a aba <b>“Guia do Chrome”</b>, selecione a guia e ative <b>“Compartilhar áudio da guia”</b>.</li>
+        <li><b>Só um programa específico</b>: instale o <a href="https://vb-audio.com/Cable/" target="_blank">VB-CABLE</a> (grátis), mande o som do programa para “CABLE Input” (Configurações → Som → Volume do app e preferências do dispositivo) e aqui escolha <b>Dispositivo de áudio → CABLE Output</b>.</li>
+      </ul>
+      <p class="muted">Firefox e Safari não capturam áudio do sistema; use Chrome ou Edge no PC.</p>
+    </div>
+
+    <div class="card">
+      <h2>🔌 Pelo cabo USB</h2>
+      <ul>
+        <li>A conexão é <b>direta entre o PC e o celular</b> (WebRTC). O site só serve para eles se encontrarem.</li>
+        <li>Para usar o cabo: ligue o USB e ative o <b>Tethering USB / Ancoragem USB</b> no Android (ou Acesso Pessoal no iPhone). Assim o tráfego vai pelo cabo, com menor atraso.</li>
+        <li>Também funciona no mesmo Wi-Fi ou até por redes diferentes — o celular mostra o tipo de conexão em uso.</li>
+        <li>O som continua saindo no PC também: abaixe/desligue as caixas do PC.</li>
       </ul>
     </div>
   </div>
 
-  <script src="pc.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="/common.js"></script>
+  <script src="/pc.js"></script>
 </body>
 </html>

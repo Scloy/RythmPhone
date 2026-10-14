@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <meta name="theme-color" content="#0d0f1a" />
   <title>RythmPhone · Caixa de som</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap narrow">
     <header>
       <div class="logo">♪</div>
       <div>
@@ -16,38 +16,48 @@
         <div class="sub">Caixa de som</div>
       </div>
       <div class="spacer"></div>
-      <span class="pill"><span class="dot" id="stDot"></span><span id="stTxt">Conectando…</span></span>
+      <span class="pill"><span class="dot" id="stDot"></span><span id="stTxt">Desconectado</span></span>
     </header>
 
     <div class="card center">
-      <button class="btn big-btn" id="playBtn"><div><span class="ico" id="playIco">▶</span><span id="playTxt">Tocar</span></div></button>
-      <div class="muted" id="srcInfo">Aguardando o PC começar a transmitir…</div>
-      <div class="meter"><div id="meter"></div></div>
-      <div class="stats">
-        <div class="stat"><b id="sBuf">0 ms</b><span>buffer</span></div>
-        <div class="stat"><b id="sUnder">0</b><span>engasgos</span></div>
-        <div class="stat"><b id="sRate">–</b><span>taxa</span></div>
+      <div id="joinBox">
+        <label class="muted" for="codeIn">Código que aparece no PC</label>
+        <input id="codeIn" class="code-in" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABC123" />
+        <button class="btn wide" id="connectBtn">🔊 Conectar e tocar</button>
       </div>
+
+      <div id="liveBox" style="display:none">
+        <button class="btn big-btn" id="tapBtn"><div><span class="ico" id="tapIco">♪</span><span id="tapTxt">Conectando…</span></div></button>
+        <div class="muted" id="info"></div>
+        <div class="stats">
+          <div class="stat"><b id="sConn">–</b><span>conexão</span></div>
+          <div class="stat"><b id="sRtt">–</b><span>ping</span></div>
+          <div class="stat"><b id="sBuf">–</b><span>buffer</span></div>
+        </div>
+        <div class="stats" style="grid-template-columns:1fr 1fr">
+          <div class="stat"><b id="sKbps">–</b><span>qualidade</span></div>
+          <div class="stat"><b id="sLoss">–</b><span>perdas</span></div>
+        </div>
+        <button class="btn ghost small" id="leaveBtn" style="margin-top:14px">Desconectar</button>
+      </div>
+      <div class="msg err" id="err"></div>
     </div>
 
     <div class="card">
       <label class="ctl">Volume <span class="val" id="volVal">100%</span>
-        <input type="range" id="vol" min="0" max="200" value="100" />
+        <input type="range" id="vol" min="0" max="100" value="100" />
       </label>
-      <label class="ctl">Atraso / Buffer <span class="val" id="latVal">80 ms</span>
-        <input type="range" id="lat" min="20" max="500" step="10" value="80" />
+      <label class="ctl">Atraso extra (estabilidade) <span class="val" id="latVal">0 ms</span>
+        <input type="range" id="lat" min="0" max="1000" step="20" value="0" />
       </label>
-      <label class="ctl">Modo de processamento
-        <select id="blk">
-          <option value="1024">Baixa latência</option>
-          <option value="2048" selected>Normal</option>
-          <option value="4096">Estável (celular fraco)</option>
-        </select>
-      </label>
-      <p class="muted">Engasgando? Aumente o buffer ou escolha “Estável”. Deixe a tela do celular ligada.</p>
+      <p class="muted">0 ms = menor atraso possível. Se picotar, aumente. Deixe a tela ligada.</p>
     </div>
+
+    <audio id="audio" autoplay playsinline></audio>
   </div>
 
-  <script src="phone.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="/common.js"></script>
+  <script src="/phone.js"></script>
 </body>
 </html>

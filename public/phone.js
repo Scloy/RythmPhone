@@ -1,266 +1,223 @@
-// Página do celular: recebe PCM 16-bit pelo WebSocket e toca com Web Audio.
-// Usa ScriptProcessorNode porque ele funciona mesmo em http:// (sem HTTPS),
-// que é o caso ao acessar o PC pelo IP do tethering USB.
+// Página do celular: conecta no PC pelo código e toca o áudio recebido via WebRTC.
 const $ = (id) => document.getElementById(id);
-const AC = window.AudioContext || window.webkitAudioContext;
+const audio = $('audio');
 
-let ws = null;
-let ctx = null;
-let proc = null;
-let gain = null;
-let playing = false;
-let wakeLock = null;
+let code = RP.normCode(new URLSearchParams(location.search).get('c') || localStorage.getItem('rp_last') || '');
+let peer = null, conn = null, call = null;
+let want = false, streaming = false, retryT = null, wakeLock = null;
+let latMs = Number(localStorage.getItem('rp_lat2') || 0);
+let last = null; // últimas estatísticas (para calcular deltas)
 
-// Formato vindo do PC
-let srcRate = 48000;
-let srcCh = 2;
-let sourceOnline = false;
+$('codeIn').value = code;
 
-// Ring buffer (estéreo), na taxa do AudioContext do celular
-const CAP = 48000 * 4;
-const ringL = new Float32Array(CAP);
-const ringR = new Float32Array(CAP);
-let rIdx = 0, wIdx = 0, count = 0;
-let primed = false;
-let underruns = 0;
-let peak = 0;
+// ---------- Conexão ----------
+function connect() {
+  clearTimeout(retryT);
+  if (!want) return;
+  if (!peer || peer.destroyed) {
+    status('warn', 'Conectando…');
+    peer = new Peer({ debug: 1 });
+    peer.on('open', openConn);
+    peer.on('call', onCall);
+    peer.on('disconnected', () => { if (want && !peer.destroyed) setTimeout(() => peer.disconnected && peer.reconnect(), 1000); });
+    peer.on('error', (err) => {
+      if (err.type === 'peer-unavailable') {
+        status('bad', 'PC não encontrado');
+        info('Confira o código e se a página do PC está aberta. Tentando de novo…');
+      } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+        status('bad', 'Sem internet');
+        info('O celular precisa de internet só para encontrar o PC. Tentando de novo…');
+      } else {
+        console.warn('PeerJS:', err.type, err);
+      }
+      retry();
+    });
+  } else if (peer.open) {
+    openConn();
+  }
+}
 
-// Reamostragem linear (se o celular não aceitar 48 kHz)
-let resPos = 0, prevL = 0, prevR = 0;
-
-let targetMs = Number(localStorage.getItem('rp_lat') || 80);
-let blockSize = Number(localStorage.getItem('rp_blk') || 2048);
-let volume = Number(localStorage.getItem('rp_vol') || 100);
-
-// ---------- WebSocket ----------
-function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?role=sink`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => updateStatus();
-  ws.onmessage = (e) => {
-    if (typeof e.data === 'string') {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.type === 'config') {
-          srcRate = m.sampleRate || 48000;
-          srcCh = m.channels || 2;
-          resetRing();
-          $('sRate').textContent = (srcRate / 1000).toFixed(1) + 'k';
-        } else if (m.type === 'source') {
-          sourceOnline = m.online;
-          if (!m.online) resetRing();
-        }
-        updateStatus();
-      } catch {}
-      return;
+function openConn() {
+  if (!want || (conn && conn.open)) return;
+  status('warn', 'Procurando o PC…');
+  conn = peer.connect(RP.peerId(code), { reliable: true, metadata: { name: deviceName() } });
+  const c = conn;
+  c.on('open', () => {
+    status('warn', 'Conectado');
+    info('Conectado ao PC. Aguardando ele começar a transmitir…');
+    setTap('⏳', 'Aguardando PC');
+  });
+  c.on('data', (d) => {
+    if (d && d.type === 'status') {
+      streaming = d.streaming;
+      if (!streaming) { info('Conectado. O PC parou/ainda não começou a transmitir.'); setTap('⏳', 'Aguardando PC'); }
     }
-    if (playing) pushPCM(e.data);
-  };
-  ws.onclose = () => {
-    sourceOnline = false;
-    updateStatus();
-    setTimeout(connectWS, 1000);
-  };
+  });
+  c.on('close', () => {
+    if (conn !== c) return;
+    conn = null;
+    if (want) { status('bad', 'Conexão perdida'); info('Reconectando…'); retry(); }
+  });
 }
 
-function updateStatus() {
-  const connected = ws && ws.readyState === 1;
-  let state = 'bad', text = 'Sem conexão';
-  if (connected && sourceOnline) { state = 'ok'; text = 'PC transmitindo'; }
-  else if (connected) { state = 'warn'; text = 'Conectado'; }
-  $('stDot').className = 'dot ' + state;
-  $('stTxt').textContent = text;
-  $('srcInfo').textContent = !connected
-    ? 'Sem conexão com o PC. Confira o cabo e o endereço.'
-    : sourceOnline
-      ? (playing ? 'Tocando o áudio do PC 🎶' : 'O PC está transmitindo. Toque em “Tocar”.')
-      : 'Aguardando o PC começar a transmitir…';
+function retry() {
+  clearTimeout(retryT);
+  if (want) retryT = setTimeout(connect, 2500);
 }
 
-// ---------- Buffer ----------
-function resetRing() {
-  rIdx = wIdx = count = 0;
-  primed = false;
-  resPos = 0;
-  prevL = prevR = 0;
+function onCall(c) {
+  try { call && call.close(); } catch {}
+  call = c;
+  last = null;
+  c.answer(undefined, { sdpTransform: RP.hifiOpus });
+  c.on('stream', (stream) => {
+    audio.srcObject = stream;
+    applyLatency();
+    applyVolume();
+    playAudio();
+  });
+  c.on('close', () => {
+    if (call !== c) return;
+    call = null;
+    audio.srcObject = null;
+    if (want) { setTap('⏳', 'Aguardando PC'); status(conn && conn.open ? 'warn' : 'bad', conn && conn.open ? 'Conectado' : 'Desconectado'); }
+  });
 }
 
-function write(l, r) {
-  ringL[wIdx] = l;
-  ringR[wIdx] = r;
-  wIdx = (wIdx + 1) % CAP;
-  if (count < CAP) count++;
-  else rIdx = (rIdx + 1) % CAP; // cheio: descarta o mais antigo
+function playAudio() {
+  audio.play().then(() => {
+    status('ok', 'Tocando');
+    info('Tocando o áudio do PC 🎶');
+    setTap('🔊', 'Tocando');
+  }).catch(() => {
+    // Navegador bloqueou o autoplay: precisa de um toque.
+    status('warn', 'Toque para ouvir');
+    setTap('▶', 'Toque para ouvir');
+  });
 }
 
-function pushPCM(ab) {
-  const s = new Int16Array(ab);
-  const ch = srcCh;
-  const n = (s.length / ch) | 0;
-  if (n === 0) return;
-  const rOff = ch > 1 ? 1 : 0;
-  const outRate = ctx ? ctx.sampleRate : srcRate;
-
-  if (outRate === srcRate) {
-    for (let i = 0; i < n; i++) {
-      write(s[i * ch] / 32768, s[i * ch + rOff] / 32768);
-    }
-    return;
+function applyLatency() {
+  const pc = call && call.peerConnection;
+  if (!pc) return;
+  for (const r of pc.getReceivers()) {
+    try { r.jitterBufferTarget = latMs; } catch {}
+    try { r.playoutDelayHint = latMs / 1000; } catch {}
   }
-
-  // Reamostragem linear com continuidade entre pacotes.
-  // Índice virtual: 0 = última amostra do pacote anterior, k = s[k-1].
-  const step = srcRate / outRate;
-  let pos = resPos;
-  while (pos < n) {
-    const i = pos | 0;
-    const f = pos - i;
-    const aL = i === 0 ? prevL : s[(i - 1) * ch] / 32768;
-    const aR = i === 0 ? prevR : s[(i - 1) * ch + rOff] / 32768;
-    const bL = s[i * ch] / 32768;
-    const bR = s[i * ch + rOff] / 32768;
-    write(aL + (bL - aL) * f, aR + (bR - aR) * f);
-    pos += step;
-  }
-  resPos = pos - n;
-  prevL = s[(n - 1) * ch] / 32768;
-  prevR = s[(n - 1) * ch + rOff] / 32768;
+}
+function applyVolume() {
+  audio.volume = Number($('vol').value) / 100;
 }
 
-// ---------- Reprodução ----------
-function onAudio(e) {
-  const outL = e.outputBuffer.getChannelData(0);
-  const outR = e.outputBuffer.numberOfChannels > 1 ? e.outputBuffer.getChannelData(1) : null;
-  const N = outL.length;
-  const rate = ctx.sampleRate;
-  const target = Math.round((targetMs / 1000) * rate);
-
-  // Pré-carrega até ter o atraso desejado.
-  if (!primed) {
-    if (count >= target + N) primed = true;
-    else { outL.fill(0); if (outR) outR.fill(0); return; }
-  }
-
-  // Se acumulou atraso demais (ex.: travada na rede), pula para o alvo.
-  const maxAllowed = target + N + Math.max(target, Math.round(0.06 * rate));
-  if (count > maxAllowed) {
-    const drop = count - (target + N);
-    rIdx = (rIdx + drop) % CAP;
-    count -= drop;
-  }
-
-  let p = 0;
-  const avail = Math.min(N, count);
-  for (let i = 0; i < avail; i++) {
-    const l = ringL[rIdx], r = ringR[rIdx];
-    outL[i] = l;
-    if (outR) outR[i] = r;
-    const a = l < 0 ? -l : l; if (a > p) p = a;
-    rIdx = (rIdx + 1) % CAP;
-  }
-  count -= avail;
-  if (avail < N) {
-    // Faltou áudio: completa com silêncio e volta a pré-carregar.
-    for (let i = avail; i < N; i++) { outL[i] = 0; if (outR) outR[i] = 0; }
-    if (sourceOnline) underruns++;
-    primed = false;
-  }
-  if (p > peak) peak = p;
-}
-
-function buildGraph() {
-  if (proc) { proc.disconnect(); proc.onaudioprocess = null; }
-  proc = ctx.createScriptProcessor(blockSize, 0, 2);
-  proc.onaudioprocess = onAudio;
-  proc.connect(gain);
-}
-
-async function play() {
-  if (!ctx) {
-    try { ctx = new AC({ sampleRate: srcRate, latencyHint: 'interactive' }); }
-    catch { ctx = new AC(); }
-    gain = ctx.createGain();
-    gain.gain.value = volume / 100;
-    gain.connect(ctx.destination);
-    buildGraph();
-  }
-  await ctx.resume();
-  resetRing();
-  playing = true;
-  requestWakeLock();
-  setPlayUI();
-  updateStatus();
-}
-
-function pause() {
-  playing = false;
-  if (ctx) ctx.suspend();
-  resetRing();
+function leave() {
+  want = false;
+  clearTimeout(retryT);
+  try { call && call.close(); } catch {}
+  try { conn && conn.close(); } catch {}
+  try { peer && peer.destroy(); } catch {}
+  call = conn = peer = null;
+  audio.srcObject = null;
   releaseWakeLock();
-  setPlayUI();
-  updateStatus();
+  status('', 'Desconectado');
+  $('joinBox').style.display = '';
+  $('liveBox').style.display = 'none';
 }
 
-function setPlayUI() {
-  $('playIco').textContent = playing ? '❚❚' : '▶';
-  $('playTxt').textContent = playing ? 'Pausar' : 'Tocar';
-  $('playBtn').classList.toggle('stop', playing);
+// ---------- Estatísticas ----------
+async function stats() {
+  const pc = call && call.peerConnection;
+  if (!pc) return;
+  const rep = await pc.getStats();
+  let inb = null, pair = null;
+  rep.forEach((r) => {
+    if (r.type === 'inbound-rtp' && r.kind === 'audio') inb = r;
+    if (r.type === 'transport' && r.selectedCandidatePairId) pair = rep.get(r.selectedCandidatePairId);
+  });
+  if (!pair) rep.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+
+  if (pair) {
+    const loc = rep.get(pair.localCandidateId) || {};
+    const rem = rep.get(pair.remoteCandidateId) || {};
+    const t = loc.candidateType === 'relay' || rem.candidateType === 'relay' ? 'relay'
+      : loc.candidateType === 'host' && rem.candidateType === 'host' ? 'host' : 'p2p';
+    $('sConn').textContent = t === 'host' ? 'Local' : t === 'relay' ? 'Servidor' : 'Internet';
+    $('sConn').title = t === 'host' ? 'Direto pela rede local (cabo USB/Wi-Fi)' : '';
+    if (pair.currentRoundTripTime != null) $('sRtt').textContent = Math.round(pair.currentRoundTripTime * 1000) + ' ms';
+  }
+  if (inb) {
+    if (last) {
+      const dt = (inb.timestamp - last.timestamp) / 1000;
+      if (dt > 0) $('sKbps').textContent = Math.round(((inb.bytesReceived - last.bytesReceived) * 8) / dt / 1000) + ' kbps';
+      const de = inb.jitterBufferEmittedCount - last.jitterBufferEmittedCount;
+      if (de > 0) $('sBuf').textContent = Math.round(((inb.jitterBufferDelay - last.jitterBufferDelay) / de) * 1000) + ' ms';
+      const lost = inb.packetsLost - last.packetsLost;
+      const got = inb.packetsReceived - last.packetsReceived;
+      if (got + lost > 0) $('sLoss').textContent = ((lost / (got + lost)) * 100).toFixed(1) + '%';
+    }
+    last = inb;
+  }
 }
 
-// ---------- Manter a tela ligada ----------
+// ---------- UI ----------
+function status(state, text) { RP.setPill('st', state, text); }
+function info(t) { $('info').textContent = t; }
+function setTap(ico, txt) { $('tapIco').textContent = ico; $('tapTxt').textContent = txt; }
+function showError(t) { $('err').textContent = t; $('err').classList.toggle('show', !!t); }
+function deviceName() {
+  const ua = navigator.userAgent;
+  const m = ua.match(/Android [\d.]+; ([^;)]+)/);
+  if (m) return m[1].replace(/Build.*/, '').trim();
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua)) return 'iPad';
+  return 'Celular';
+}
+
 async function requestWakeLock() {
-  try {
-    if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
-  } catch {}
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
 function releaseWakeLock() {
-  try { if (wakeLock) wakeLock.release(); } catch {}
+  try { wakeLock && wakeLock.release(); } catch {}
   wakeLock = null;
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && playing) {
+  if (document.visibilityState === 'visible' && want) {
     requestWakeLock();
-    if (ctx && ctx.state !== 'running') ctx.resume();
+    if (audio.srcObject && audio.paused) playAudio();
+    if (!conn || !conn.open) connect();
   }
 });
 
-// ---------- UI ----------
-function tick() {
-  const rate = ctx ? ctx.sampleRate : srcRate;
-  $('sBuf').textContent = Math.round((count / rate) * 1000) + ' ms';
-  $('sUnder').textContent = underruns;
-  const db = peak > 0 ? 20 * Math.log10(peak) : -100;
-  $('meter').style.width = Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) + '%';
-  peak *= 0.85;
-  requestAnimationFrame(tick);
-}
+$('connectBtn').onclick = () => {
+  code = RP.normCode($('codeIn').value);
+  if (code.length < 4) { showError('Digite o código que aparece na tela do PC.'); return; }
+  showError('');
+  localStorage.setItem('rp_last', code);
+  history.replaceState(null, '', '?c=' + code);
+  audio.play().catch(() => {}); // aproveita o toque para liberar o áudio
+  $('joinBox').style.display = 'none';
+  $('liveBox').style.display = '';
+  setTap('♪', 'Conectando…');
+  want = true;
+  requestWakeLock();
+  connect();
+};
+$('codeIn').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('connectBtn').click(); });
+$('tapBtn').onclick = () => { if (audio.srcObject) playAudio(); };
+$('leaveBtn').onclick = leave;
 
-$('playBtn').onclick = () => (playing ? pause() : play());
-
-$('vol').value = volume;
-$('volVal').textContent = volume + '%';
-$('vol').oninput = (e) => {
-  volume = Number(e.target.value);
-  $('volVal').textContent = volume + '%';
-  if (gain) gain.gain.value = volume / 100;
-  localStorage.setItem('rp_vol', volume);
+$('vol').value = localStorage.getItem('rp_vol2') || 100;
+$('volVal').textContent = $('vol').value + '%';
+$('vol').oninput = () => {
+  $('volVal').textContent = $('vol').value + '%';
+  localStorage.setItem('rp_vol2', $('vol').value);
+  applyVolume();
+};
+$('lat').value = latMs;
+$('latVal').textContent = latMs + ' ms';
+$('lat').oninput = () => {
+  latMs = Number($('lat').value);
+  $('latVal').textContent = latMs + ' ms';
+  localStorage.setItem('rp_lat2', latMs);
+  applyLatency();
 };
 
-$('lat').value = targetMs;
-$('latVal').textContent = targetMs + ' ms';
-$('lat').oninput = (e) => {
-  targetMs = Number(e.target.value);
-  $('latVal').textContent = targetMs + ' ms';
-  localStorage.setItem('rp_lat', targetMs);
-};
-
-$('blk').value = String(blockSize);
-$('blk').onchange = (e) => {
-  blockSize = Number(e.target.value);
-  localStorage.setItem('rp_blk', blockSize);
-  if (ctx) { buildGraph(); resetRing(); }
-};
-
-connectWS();
-tick();
+setInterval(stats, 1000);

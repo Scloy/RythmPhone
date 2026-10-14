@@ -1,184 +1,277 @@
-// Página do PC: captura o áudio do sistema e envia ao servidor.
+// Página do PC: captura o áudio e envia por WebRTC (PeerJS) direto para os celulares.
 const $ = (id) => document.getElementById(id);
-const SAMPLE_RATE = 48000;
-const CHUNK_FRAMES = 480; // 10 ms por pacote
 
-let ws = null;
-let ctx = null;
-let stream = null;
-let node = null;
-let peak = 0;
+let code = RP.normCode(localStorage.getItem('rp_code')) || RP.newCode();
+localStorage.setItem('rp_code', code);
 
-// ---------- WebSocket ----------
-function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?role=source`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => {
-    setPill('srv', 'ok', 'Servidor conectado');
-    if (ctx) sendConfig();
-  };
-  ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') return;
-    try {
-      const m = JSON.parse(e.data);
-      if (m.type === 'listeners') {
-        setPill('lis', m.count > 0 ? 'ok' : '', `${m.count} celular${m.count === 1 ? '' : 'es'} ouvindo`);
-      }
-    } catch {}
-  };
-  ws.onclose = () => {
-    setPill('srv', 'bad', 'Servidor desconectado');
-    setTimeout(connectWS, 1000);
-  };
+let peer = null;
+const phones = new Map(); // peerId -> { conn, call, name }
+let capture = null;       // stream original (tela/dispositivo)
+let outStream = null;     // só as faixas de áudio
+let actx = null, analyser = null, meterData = null;
+
+// ---------- Código / QR ----------
+function phoneUrl() {
+  return new URL('/phone?c=' + code, location.href).href;
+}
+function renderCode() {
+  $('code').textContent = code;
+  const url = phoneUrl();
+  $('phoneLink').textContent = new URL('/phone', location.href).href.replace(/^https?:\/\//, '');
+  $('phoneLink').href = url;
+  $('qr').src = 'https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=10&data=' + encodeURIComponent(url);
 }
 
-function sendConfig() {
-  if (ws && ws.readyState === 1 && ctx) {
-    ws.send(JSON.stringify({ type: 'config', sampleRate: ctx.sampleRate, channels: 2 }));
+// ---------- Sinalização (PeerJS) ----------
+function initPeer() {
+  RP.setPill('srv', 'warn', 'Conectando…');
+  peer = new Peer(RP.peerId(code), { debug: 1 });
+
+  peer.on('open', () => RP.setPill('srv', 'ok', 'Online'));
+  peer.on('connection', onPhoneConn);
+  peer.on('disconnected', () => {
+    RP.setPill('srv', 'warn', 'Reconectando…');
+    setTimeout(() => { if (peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1500);
+  });
+  peer.on('error', (err) => {
+    if (err.type === 'unavailable-id') {
+      // Outra aba com o mesmo código aberta: gera outro.
+      peer.destroy();
+      code = RP.newCode();
+      localStorage.setItem('rp_code', code);
+      renderCode();
+      initPeer();
+    } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+      RP.setPill('srv', 'bad', 'Sem conexão — verifique a internet');
+    } else if (err.type !== 'peer-unavailable') {
+      console.warn('PeerJS:', err.type, err);
+    }
+  });
+}
+
+function onPhoneConn(conn) {
+  conn.on('open', () => {
+    phones.set(conn.peer, { conn, call: null, name: (conn.metadata && conn.metadata.name) || 'Celular' });
+    sendStatus(conn);
+    if (outStream) callPhone(conn.peer);
+    renderPhones();
+  });
+  conn.on('close', () => removePhone(conn.peer));
+  conn.on('error', () => removePhone(conn.peer));
+}
+
+function removePhone(id) {
+  const p = phones.get(id);
+  if (!p) return;
+  try { p.call && p.call.close(); } catch {}
+  phones.delete(id);
+  renderPhones();
+}
+
+function sendStatus(conn) {
+  try { conn.open && conn.send({ type: 'status', streaming: !!outStream }); } catch {}
+}
+function broadcastStatus() {
+  for (const p of phones.values()) sendStatus(p.conn);
+}
+
+function callPhone(id) {
+  const p = phones.get(id);
+  if (!p || !outStream) return;
+  try { p.call && p.call.close(); } catch {}
+  const call = peer.call(id, outStream, { sdpTransform: RP.hifiOpus });
+  p.call = call;
+  const watch = () => {
+    const pc = call.peerConnection;
+    if (!pc) return setTimeout(watch, 50);
+    pc.addEventListener('connectionstatechange', () => {
+      if (pc.connectionState === 'connected') tuneSenders(pc);
+      renderPhones();
+    });
+  };
+  watch();
+  const done = () => { if (p.call === call) p.call = null; renderPhones(); };
+  call.on('close', done);
+  call.on('error', done);
+  renderPhones();
+}
+
+function tuneSenders(pc) {
+  for (const s of pc.getSenders()) {
+    if (!s.track || s.track.kind !== 'audio') continue;
+    try {
+      const params = s.getParameters();
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.encodings[0].maxBitrate = RP.BITRATE;
+      params.encodings[0].priority = 'high';
+      params.encodings[0].networkPriority = 'high';
+      s.setParameters(params).catch(() => {});
+    } catch {}
   }
 }
 
-function setPill(prefix, state, text) {
-  $(prefix + 'Dot').className = 'dot ' + (state || '');
-  $(prefix + 'Txt').textContent = text;
-}
-
-function showError(text) {
-  const el = $('err');
-  el.innerHTML = text;
-  el.classList.toggle('show', !!text);
+function renderPhones() {
+  const n = phones.size;
+  RP.setPill('lis', n ? 'ok' : '', `${n} celular${n === 1 ? '' : 'es'}`);
+  const box = $('phones');
+  box.innerHTML = '';
+  for (const p of phones.values()) {
+    const st = p.call && p.call.peerConnection ? p.call.peerConnection.connectionState : null;
+    const label = !outStream ? 'conectado · aguardando transmissão'
+      : st === 'connected' ? '🔊 recebendo áudio'
+      : st === 'failed' ? '❌ falhou (tente outra rede)'
+      : 'conectando áudio…';
+    const el = document.createElement('div');
+    el.className = 'phone-item';
+    el.innerHTML = '<span>📱</span><b></b><span class="muted"></span>';
+    el.querySelector('b').textContent = p.name;
+    el.querySelector('.muted').textContent = label;
+    box.appendChild(el);
+  }
 }
 
 // ---------- Captura ----------
+const NO_PROC = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 };
+
+async function getSource() {
+  if ($('mode').value === 'device') {
+    const id = $('device').value;
+    return navigator.mediaDevices.getUserMedia({ audio: { ...NO_PROC, ...(id ? { deviceId: { exact: id } } : {}) } });
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    throw new Error('Seu navegador não suporta captura de tela/áudio. Use o Chrome ou Edge no computador.');
+  }
+  return navigator.mediaDevices.getDisplayMedia({
+    video: { frameRate: 1, width: { max: 640 }, height: { max: 360 } },
+    audio: { ...NO_PROC, suppressLocalAudioPlayback: false },
+    systemAudio: 'include',
+    windowAudio: 'window', // Chrome recente: tenta capturar áudio da janela, se suportado
+    selfBrowserSurface: 'exclude',
+    surfaceSwitching: 'include',
+    monitorTypeSurfaces: 'include',
+  });
+}
+
 async function start() {
   showError('');
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    showError('Este navegador não suporta captura de áudio. Use o <b>Chrome</b> ou <b>Edge</b> e abra pelo endereço <code>http://localhost:3000</code>.');
-    return;
-  }
+  let s;
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 1, width: 320, height: 180 },
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 2,
-        sampleRate: SAMPLE_RATE,
-      },
-      systemAudio: 'include',
-      selfBrowserSurface: 'exclude',
-      surfaceSwitching: 'exclude',
-      monitorTypeSurfaces: 'include',
-    });
+    s = await getSource();
   } catch (err) {
-    if (err && err.name === 'NotAllowedError') showError('Compartilhamento cancelado.');
-    else showError('Erro ao capturar: ' + (err && err.message));
+    if (err && err.name === 'NotAllowedError') showError('Compartilhamento cancelado ou bloqueado.');
+    else if (err && err.name === 'OverconstrainedError') showError('Dispositivo não encontrado. Clique em “Listar dispositivos” de novo.');
+    else showError((err && err.message) || String(err));
     return;
   }
 
-  const audioTracks = stream.getAudioTracks();
-  if (audioTracks.length === 0) {
-    stream.getTracks().forEach((t) => t.stop());
-    stream = null;
-    showError('Nenhum áudio foi compartilhado. Clique de novo, escolha <b>“Tela inteira”</b> e <b>marque “Compartilhar áudio do sistema”</b>.');
+  const audio = s.getAudioTracks();
+  if (!audio.length) {
+    const surface = s.getVideoTracks()[0]?.getSettings?.().displaySurface;
+    s.getTracks().forEach((t) => t.stop());
+    showError(surface === 'window'
+      ? 'Você escolheu uma <b>Janela</b> — o Chrome/Edge não captura áudio de janelas. Escolha <b>“Tela inteira”</b> + <b>“Compartilhar áudio do sistema”</b>, ou uma <b>Guia</b> + <b>“Compartilhar áudio da guia”</b>.'
+      : 'Nenhum áudio foi compartilhado. Ative a opção <b>“Compartilhar áudio do sistema”</b> (Tela inteira) ou <b>“Compartilhar áudio da guia”</b> (Guia).');
     return;
   }
 
-  // Se o usuário clicar em "Parar compartilhamento" na barra do Chrome.
-  stream.getTracks().forEach((t) => (t.onended = stop));
+  audio.forEach((t) => { try { t.contentHint = 'music'; } catch {} });
+  capture = s;
+  outStream = new MediaStream(audio);
+  s.getTracks().forEach((t) => (t.onended = stop));
 
-  ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
-  await ctx.audioWorklet.addModule('capture-worklet.js');
+  // Medidor de nível
+  try {
+    actx = new AudioContext();
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 1024;
+    meterData = new Float32Array(analyser.fftSize);
+    actx.createMediaStreamSource(outStream).connect(analyser);
+  } catch {}
 
-  const src = ctx.createMediaStreamSource(new MediaStream(audioTracks));
-  node = new AudioWorkletNode(ctx, 'capture-processor', {
-    numberOfInputs: 1,
-    numberOfOutputs: 1,
-    outputChannelCount: [2],
-    channelCount: 2,
-    channelCountMode: 'explicit',
-    processorOptions: { chunkFrames: CHUNK_FRAMES },
-  });
-  // Saída silenciosa só para manter o grafo de áudio "puxando" o worklet.
-  const mute = ctx.createGain();
-  mute.gain.value = 0;
-  src.connect(node).connect(mute).connect(ctx.destination);
-
-  node.port.onmessage = (e) => {
-    const { pcm, peak: p } = e.data;
-    if (p > peak) peak = p;
-    // Se a rede travar, descarta em vez de acumular atraso.
-    if (ws && ws.readyState === 1 && ws.bufferedAmount < 64 * 1024) ws.send(pcm);
-  };
-
-  sendConfig();
+  for (const id of phones.keys()) callPhone(id);
+  broadcastStatus();
   $('startBtn').style.display = 'none';
   $('stopBtn').style.display = '';
-  $('hint').classList.remove('show');
+  $('mode').disabled = true;
+  renderPhones();
 }
 
 function stop() {
-  if (stream) stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
-  stream = null;
-  if (node) node.port.onmessage = null;
-  node = null;
-  if (ctx) ctx.close();
-  ctx = null;
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
+  for (const p of phones.values()) { try { p.call && p.call.close(); } catch {} p.call = null; }
+  if (capture) capture.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+  capture = null;
+  outStream = null;
+  if (actx) actx.close().catch(() => {});
+  actx = analyser = null;
+  broadcastStatus();
   $('startBtn').style.display = '';
   $('stopBtn').style.display = 'none';
-  $('hint').classList.add('show');
+  $('mode').disabled = false;
+  renderPhones();
 }
 
-// ---------- Medidor ----------
+// ---------- Dispositivos ----------
+async function listDevices() {
+  showError('');
+  try {
+    // Precisa de permissão para ver os nomes dos dispositivos.
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tmp.getTracks().forEach((t) => t.stop());
+  } catch {
+    showError('Permissão de áudio negada. Libere o microfone para este site nas configurações do navegador.');
+    return;
+  }
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+  const sel = $('device');
+  sel.innerHTML = '';
+  const loop = /stereo mix|mixagem|cable output|voicemeeter|loopback|what u hear|wave out/i;
+  let pick = null;
+  for (const d of devs) {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = (loop.test(d.label) ? '⭐ ' : '') + (d.label || 'Dispositivo');
+    if (!pick && loop.test(d.label)) pick = d.deviceId;
+    sel.appendChild(o);
+  }
+  if (pick) sel.value = pick;
+  if (!pick) showError('Nenhum dispositivo de “loopback” encontrado. Ative a <b>Mixagem estéreo</b> (Painel de Som → Gravação → clique direito → Mostrar dispositivos desabilitados) ou instale o <a href="https://vb-audio.com/Cable/" target="_blank">VB-CABLE</a>. Microfones também aparecem na lista.');
+}
+
+// ---------- UI ----------
+function showError(html) {
+  $('err').innerHTML = html;
+  $('err').classList.toggle('show', !!html);
+}
+
 function drawMeter() {
-  const db = peak > 0 ? 20 * Math.log10(peak) : -100;
-  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  let pct = 0;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(meterData);
+    let peak = 0;
+    for (let i = 0; i < meterData.length; i++) { const a = Math.abs(meterData[i]); if (a > peak) peak = a; }
+    const db = peak > 0 ? 20 * Math.log10(peak) : -100;
+    pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  }
   $('meter').style.width = pct + '%';
-  peak *= 0.85;
   requestAnimationFrame(drawMeter);
 }
 
-// ---------- Endereços para o celular ----------
-async function refreshInfo() {
-  try {
-    const info = await (await fetch('/api/info', { cache: 'no-store' })).json();
-    const box = $('urls');
-    box.innerHTML = '';
-    const ips = info.ips || [];
-    if (ips.length === 0) {
-      box.innerHTML = '<div class="muted">Nenhuma rede encontrada. Ative o tethering USB no celular e clique em Atualizar.</div>';
-    }
-    for (const { name, address } of ips) {
-      const url = `http://${address}:${info.port}/phone`;
-      const item = document.createElement('div');
-      item.className = 'item';
-      item.innerHTML = `<small></small><span class="url"></span><button class="btn ghost" style="padding:8px 12px;font-size:13px">Copiar</button>`;
-      item.querySelector('small').textContent = name;
-      item.querySelector('.url').textContent = url;
-      item.querySelector('button').onclick = () => navigator.clipboard && navigator.clipboard.writeText(url);
-      box.appendChild(item);
-    }
-    $('adbUrl').textContent = `http://localhost:${info.port}/phone`;
-    $('adbStatus').textContent = info.adb ? '✅ conectado — abra o endereço acima no celular' : 'não detectado (adb não encontrado ou celular sem depuração USB)';
-  } catch {}
-}
-
-// ---------- Abas ----------
-document.querySelectorAll('.tab').forEach((tab) => {
-  tab.onclick = () => {
-    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + tab.dataset.tab));
-  };
-});
-
+$('mode').onchange = () => { $('deviceBox').style.display = $('mode').value === 'device' ? '' : 'none'; };
+$('listBtn').onclick = listDevices;
 $('startBtn').onclick = start;
 $('stopBtn').onclick = stop;
-$('refreshBtn').onclick = refreshInfo;
+$('newCodeBtn').onclick = () => {
+  if (outStream) stop();
+  for (const id of [...phones.keys()]) { try { phones.get(id).conn.close(); } catch {} removePhone(id); }
+  if (peer) peer.destroy();
+  code = RP.newCode();
+  localStorage.setItem('rp_code', code);
+  renderCode();
+  initPeer();
+};
+if (RP.isMobile()) $('mobileBanner').classList.add('show');
+setInterval(renderPhones, 2000);
 
-connectWS();
-refreshInfo();
-setInterval(refreshInfo, 5000);
+renderCode();
+initPeer();
 drawMeter();
