@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RythmPhone · PC (transmissor)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">♪</div>
+      <div>
+        <h1>RythmPhone</h1>
+        <div class="sub">Use o celular como caixa de som do PC pelo cabo USB</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="pill"><span class="dot" id="srvDot"></span><span id="srvTxt">Servidor…</span></span>
+    </header>
+
+    <div class="card">
+      <h2>1 · Transmitir o áudio do PC</h2>
+      <div class="row">
+        <button class="btn" id="startBtn">▶ Começar a transmitir</button>
+        <button class="btn stop" id="stopBtn" style="display:none">■ Parar</button>
+        <div class="spacer"></div>
+        <span class="pill"><span class="dot" id="lisDot"></span><span id="lisTxt">0 celulares ouvindo</span></span>
+      </div>
+      <div class="meter"><div id="meter"></div></div>
+      <div class="msg info show" id="hint">
+        Ao clicar, o navegador vai perguntar o que compartilhar. Escolha
+        <b>“Tela inteira”</b> e <b>marque “Compartilhar áudio do sistema”</b>
+        (canto inferior esquerdo da janela). Funciona no Chrome ou Edge no Windows.
+      </div>
+      <div class="msg err" id="err"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Conectar o celular pelo USB</h2>
+      <div class="tabs">
+        <div class="tab active" data-tab="teth">Tethering USB (mais fácil)</div>
+        <div class="tab" data-tab="adb">ADB (sem usar dados)</div>
+      </div>
+
+      <div class="tabpane active" id="tab-teth">
+        <ol>
+          <li>Ligue o celular no PC com o cabo USB.</li>
+          <li>
+            <b>Android:</b> Configurações → Rede/Conexões → Ponto de acesso e tethering → ative
+            <b>Tethering USB</b> (ou “Ancoragem USB”).<br />
+            <b>iPhone:</b> Ajustes → Acesso Pessoal → ative (com o iTunes instalado no PC).
+          </li>
+          <li>Clique em “Atualizar” abaixo e abra no navegador do celular o endereço que apareceu
+            (normalmente começa com <code>192.168.</code> ou <code>172.20.</code>):</li>
+        </ol>
+        <div class="urls" id="urls"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn ghost" id="refreshBtn">↻ Atualizar endereços</button>
+        </div>
+        <p class="muted">
+          Se o Windows perguntar sobre o Firewall para o Node.js, permita em <b>redes privadas e públicas</b>.
+          Obs.: com tethering o PC pode passar a usar a internet do celular; se não quiser, use a aba ADB.
+        </p>
+      </div>
+
+      <div class="tabpane" id="tab-adb">
+        <ol>
+          <li>No celular, ative as <b>Opções do desenvolvedor</b> e a <b>Depuração USB</b>.</li>
+          <li>Baixe o <a href="https://developer.android.com/tools/releases/platform-tools" target="_blank">Android Platform Tools</a>
+            e extraia a pasta <code>platform-tools</code> dentro da pasta do RythmPhone (ou coloque o adb no PATH).</li>
+          <li>Conecte o cabo e aceite o pedido de depuração no celular. O servidor faz o resto automaticamente.</li>
+          <li>No celular, abra: <span class="url" id="adbUrl">http://localhost:3000/phone</span></li>
+        </ol>
+        <p class="muted">Status do ADB: <b id="adbStatus">verificando…</b></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Dicas</h2>
+      <ul>
+        <li>No celular, toque em <b>Tocar</b> e deixe a tela ligada.</li>
+        <li>O som continua saindo no PC também — abaixe o volume das caixas/fones do PC (ou deixe-as desligadas).</li>
+        <li>Se picotar, aumente o “Atraso/Buffer” na tela do celular.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script src="pc.js"></script>
+</body>
+</html>

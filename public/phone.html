@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="theme-color" content="#0d0f1a" />
+  <title>RythmPhone · Caixa de som</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">♪</div>
+      <div>
+        <h1>RythmPhone</h1>
+        <div class="sub">Caixa de som</div>
+      </div>
+      <div class="spacer"></div>
+      <span class="pill"><span class="dot" id="stDot"></span><span id="stTxt">Conectando…</span></span>
+    </header>
+
+    <div class="card center">
+      <button class="btn big-btn" id="playBtn"><div><span class="ico" id="playIco">▶</span><span id="playTxt">Tocar</span></div></button>
+      <div class="muted" id="srcInfo">Aguardando o PC começar a transmitir…</div>
+      <div class="meter"><div id="meter"></div></div>
+      <div class="stats">
+        <div class="stat"><b id="sBuf">0 ms</b><span>buffer</span></div>
+        <div class="stat"><b id="sUnder">0</b><span>engasgos</span></div>
+        <div class="stat"><b id="sRate">–</b><span>taxa</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label class="ctl">Volume <span class="val" id="volVal">100%</span>
+        <input type="range" id="vol" min="0" max="200" value="100" />
+      </label>
+      <label class="ctl">Atraso / Buffer <span class="val" id="latVal">80 ms</span>
+        <input type="range" id="lat" min="20" max="500" step="10" value="80" />
+      </label>
+      <label class="ctl">Modo de processamento
+        <select id="blk">
+          <option value="1024">Baixa latência</option>
+          <option value="2048" selected>Normal</option>
+          <option value="4096">Estável (celular fraco)</option>
+        </select>
+      </label>
+      <p class="muted">Engasgando? Aumente o buffer ou escolha “Estável”. Deixe a tela do celular ligada.</p>
+    </div>
+  </div>
+
+  <script src="phone.js"></script>
+</body>
+</html>
